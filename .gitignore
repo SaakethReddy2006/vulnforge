@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+vulnforge_app.db
+test_vulnforge.db
+
+# Environment & API Secret Keys
+.env
+.env.*
+*.pem
+*.key
+
+# Streamlit Cache & Local Configurations
+.streamlit/
+*.log
+
+# Pytest / Coverage Reports
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# PDF Output Reports (Optional: keep local generated reports out of git)
+*.pdf
