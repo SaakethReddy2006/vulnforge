@@ -3,18 +3,18 @@ import hashlib
 from typing import List, Dict, Any
 
 class SecurityInspector:
-    """Automates HTTP response security inspection and fingerprint deduplication."""
+    """Performs passive and active HTTP security inspections against authorized target endpoints."""
 
     def __init__(self, timeout: float = 6.0):
         self.timeout = timeout
 
     def _build_fingerprint(self, target_id: int, endpoint: str, vuln_name: str, snippet: str) -> str:
-        """Generates a SHA-256 fingerprint hash to prevent duplicate findings."""
+        """Generates a unique SHA-256 fingerprint for scan deduplication."""
         raw_seed = f"{target_id}:{endpoint}:{vuln_name}:{snippet}"
         return hashlib.sha256(raw_seed.encode('utf-8')).hexdigest()
 
     def run_checks(self, target_id: int, target_url: str) -> List[Dict[str, Any]]:
-        """Executes custom inspection logic against an authorized target URL."""
+        """Executes custom security inspection checks against the target URL."""
         findings = []
 
         try:
@@ -69,8 +69,24 @@ class SecurityInspector:
                         "fingerprint": self._build_fingerprint(target_id, endpoint_str, f"Insecure Cookie ({cookie.name})", evidence_str)
                     })
 
-            # 3. Server Version Disclosure
-            for banner_header in ["server", "x-powered-by"]:
+            # 3. Permissive CORS Misconfiguration
+            cors_origin = headers_lower.get("access-control-allow-origin", "")
+            if cors_origin == "*":
+                evidence_str = f"Header 'Access-Control-Allow-Origin: *' observed on endpoint {endpoint_str}"
+                findings.append({
+                    "name": "Permissive Cross-Origin Resource Sharing (CORS) Policy",
+                    "category": "Access Control",
+                    "risk_level": "Medium",
+                    "confidence": "High",
+                    "endpoint": endpoint_str,
+                    "remediation": "Restrict Access-Control-Allow-Origin to trusted domains instead of wildcards (*).",
+                    "evidence": evidence_str,
+                    "check_source": "SecurityInspector Engine",
+                    "fingerprint": self._build_fingerprint(target_id, endpoint_str, "CORS Wildcard Policy", evidence_str)
+                })
+
+            # 4. Server Banner Technology Disclosure
+            for banner_header in ["server", "x-powered-by", "x-aspnet-version"]:
                 if banner_header in headers_lower:
                     value = headers_lower[banner_header]
                     evidence_str = f"Response header '{banner_header}' disclosed tech stack: '{value}'"
@@ -80,11 +96,32 @@ class SecurityInspector:
                         "risk_level": "Info",
                         "confidence": "High",
                         "endpoint": endpoint_str,
-                        "remediation": f"Obfuscate or suppress the '{banner_header.title()}' header in server configuration.",
+                        "remediation": f"Obfuscate or suppress the '{banner_header.title()}' header in web server configuration.",
                         "evidence": evidence_str,
                         "check_source": "SecurityInspector Engine",
                         "fingerprint": self._build_fingerprint(target_id, endpoint_str, f"Info Disclosure ({banner_header})", evidence_str)
                     })
+
+            # 5. Enabled Unsafe HTTP Methods (OPTIONS Check)
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    opt_res = client.options(target_url)
+                    allowed_methods = opt_res.headers.get("allow", "").upper()
+                    if "TRACE" in allowed_methods or "PUT" in allowed_methods or "DELETE" in allowed_methods:
+                        evidence_str = f"Server allowed potentially dangerous HTTP methods: {allowed_methods}"
+                        findings.append({
+                            "name": "Unsafe HTTP Methods Enabled",
+                            "category": "Server Configuration",
+                            "risk_level": "Medium",
+                            "confidence": "Medium",
+                            "endpoint": endpoint_str,
+                            "remediation": "Disable unnecessary HTTP verb methods (PUT, DELETE, TRACE) on public application servers.",
+                            "evidence": evidence_str,
+                            "check_source": "SecurityInspector Engine",
+                            "fingerprint": self._build_fingerprint(target_id, endpoint_str, "Unsafe HTTP Methods", evidence_str)
+                        })
+            except Exception:
+                pass
 
         except httpx.RequestError as exc:
             print(f"[!] Inspection execution warning for {target_url}: {exc}")
