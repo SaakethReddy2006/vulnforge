@@ -1,11 +1,13 @@
 import os
 import json
 import pytest
+from unittest.mock import patch, MagicMock
 from db import DatabaseManager
 from core.validator import ScopeValidator
 from engine.custom_scanner import SecurityInspector
 from reporting.sarif_exporter import SARIFExporter
 from core.recon import ReconEngine
+from engine.cve_lookup import VulnerabilityIntelligence
 
 @pytest.fixture
 def test_db(tmp_path):
@@ -131,12 +133,10 @@ def test_recon_engine_subdomain_discovery_scope_filter():
     validator = ScopeValidator()
     recon = ReconEngine(validator=validator)
 
-    # Authorized local domain
     subdomains = recon.discover_subdomains("localhost")
     assert isinstance(subdomains, list)
     assert "localhost" in subdomains
 
-    # External unauthorized domain should return empty list due to zero-trust scope filter
     ext_subdomains = recon.discover_subdomains("example.com")
     assert ext_subdomains == []
 
@@ -145,4 +145,93 @@ def test_recon_engine_async_port_scan():
     validator = ScopeValidator()
     recon = ReconEngine(validator=validator)
 
-    # Probe port 8
+    results = recon.run_port_scan("localhost", ports=[80, 443])
+    assert isinstance(results, list)
+    for port_info in results:
+        assert "port" in port_info
+        assert "state" in port_info
+        assert port_info["state"] == "open"
+
+def test_recon_engine_tech_fingerprint_scope_guard():
+    """Verify technology stack fingerprinting aborts cleanly on scope violation."""
+    validator = ScopeValidator()
+    recon = ReconEngine(validator=validator)
+
+    res = recon.fingerprint_tech_stack("https://google.com")
+    assert "error" in res
+    assert "Scope Violation" in res["error"]
+
+@patch("urllib.request.urlopen")
+def test_epss_score_retrieval(mock_urlopen):
+    """Verify EPSS score lookup parses FIRST API response correctly."""
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.read.return_value = json.dumps({
+        "data": [{
+            "cve": "CVE-2021-44228",
+            "epss": "0.9754",
+            "percentile": "0.9998"
+        }]
+    }).encode("utf-8")
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    intel = VulnerabilityIntelligence()
+    res = intel.fetch_epss_score("CVE-2021-44228")
+
+    assert res["cve"] == "CVE-2021-44228"
+    assert res["epss_score"] == 0.9754
+    assert res["percentile"] == 0.9998
+
+@patch("urllib.request.urlopen")
+def test_nvd_cve_search_by_keyword(mock_urlopen):
+    """Verify NVD CVE keyword search correctly parses vulnerability records and attaches EPSS scores."""
+    # Mock NVD payload
+    mock_nvd_payload = {
+        "vulnerabilities": [{
+            "cve": {
+                "id": "CVE-2021-23017",
+                "descriptions": [{"value": "1-byte memory overwrite in Nginx resolver."}],
+                "metrics": {
+                    "cvssMetricV31": [{
+                        "cvssData": {
+                            "baseScore": 9.8,
+                            "baseSeverity": "CRITICAL"
+                        }
+                    }]
+                }
+            }
+        }]
+    }
+
+    # Mock EPSS payload
+    mock_epss_payload = {
+        "data": [{
+            "cve": "CVE-2021-23017",
+            "epss": "0.8500",
+            "percentile": "0.9800"
+        }]
+    }
+
+    # Context manager setup for sequential urlopen calls
+    mock_resp_nvd = MagicMock()
+    mock_resp_nvd.status = 200
+    mock_resp_nvd.read.return_value = json.dumps(mock_nvd_payload).encode("utf-8")
+
+    mock_resp_epss = MagicMock()
+    mock_resp_epss.status = 200
+    mock_resp_epss.read.return_value = json.dumps(mock_epss_payload).encode("utf-8")
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=MagicMock(return_value=mock_resp_nvd)),
+        MagicMock(__enter__=MagicMock(return_value=mock_resp_epss))
+    ]
+
+    intel = VulnerabilityIntelligence()
+    results = intel.search_cves_by_keyword("nginx 1.18.0", limit=1)
+
+    assert len(results) == 1
+    cve = results[0]
+    assert cve["cve_id"] == "CVE-2021-23017"
+    assert cve["severity"] == "CRITICAL"
+    assert cve["cvss_score"] == 9.8
+    assert cve["epss_probability"] == "85.00%"
