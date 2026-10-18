@@ -198,11 +198,14 @@ elif nav_choice == "Asset Reconnaissance":
         if st.button("Query NVD & EPSS Threat Intelligence"):
             with st.spinner(f"Fetching live CVE & EPSS intelligence for '{tech_keyword}'..."):
                 cve_data = vuln_intel.search_cves_by_keyword(tech_keyword)
-                if cve_data and "error" not in cve_data[0]:
+                
+                if not cve_data:
+                    st.warning("No CVE records found for the specified keyword.")
+                elif "error" in cve_data[0]:
+                    st.error(cve_data[0]["error"])
+                else:
                     st.success(f"Retrieved {len(cve_data)} threat intelligence records.")
                     st.dataframe(cve_data, use_container_width=True)
-                else:
-                    st.warning(cve_data[0].get("error", "No CVE records found."))
 
 # -----------------------------------------------------------------------------
 # PAGE 2: TARGET SCOPE CONTROL
