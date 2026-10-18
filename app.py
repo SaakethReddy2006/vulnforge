@@ -6,6 +6,7 @@ from engine.custom_scanner import SecurityInspector
 from reporting.pdf_generator import PDFReportGenerator
 from core.auth import AuthManager
 from core.recon import ReconEngine
+from engine.cve_lookup import VulnerabilityIntelligence
 
 # Page Configuration
 st.set_page_config(page_title="VulnForge Portal", layout="wide", page_icon="🛡️")
@@ -17,6 +18,7 @@ inspector = SecurityInspector()
 pdf_gen = PDFReportGenerator()
 auth_mgr = AuthManager()
 recon_engine = ReconEngine(validator)
+vuln_intel = VulnerabilityIntelligence()
 
 # Initialize Session State
 if "authenticated" not in st.session_state:
@@ -126,11 +128,11 @@ if nav_choice == "Overview Dashboard":
         st.info("No security observations recorded in database yet.")
 
 # -----------------------------------------------------------------------------
-# PAGE: ASSET RECONNAISSANCE (TRACK 1)
+# PAGE: ASSET RECONNAISSANCE & THREAT INTELLIGENCE
 # -----------------------------------------------------------------------------
 elif nav_choice == "Asset Reconnaissance":
     st.title("🔎 Automated Asset Discovery & Reconnaissance")
-    st.caption("Passive CT log subdomain discovery, async port scanning, and tech stack fingerprinting.")
+    st.caption("Passive CT log subdomain discovery, async port scanning, stack fingerprinting, and live CVE/EPSS intelligence.")
 
     targets = db.fetch_all_targets()
     if not targets:
@@ -167,6 +169,21 @@ elif nav_choice == "Asset Reconnaissance":
             with st.spinner("Analyzing HTTP headers & meta banners..."):
                 tech_data = recon_engine.fingerprint_tech_stack(target["target_url"])
                 st.json(tech_data)
+
+        st.divider()
+        st.subheader("🌐 Live Threat & Vulnerability Intelligence (CVE / EPSS)")
+        st.caption("Query live NVD vulnerability records and EPSS exploitability probabilities for technology banners.")
+
+        tech_keyword = st.text_input("Enter Tech Banner or Keyword for CVE Lookup", value="nginx 1.18.0")
+
+        if st.button("Query NVD & EPSS Threat Intelligence"):
+            with st.spinner(f"Fetching live CVE & EPSS intelligence for '{tech_keyword}'..."):
+                cve_data = vuln_intel.search_cves_by_keyword(tech_keyword)
+                if cve_data and "error" not in cve_data[0]:
+                    st.success(f"Retrieved {len(cve_data)} threat intelligence records.")
+                    st.dataframe(cve_data, use_container_width=True)
+                else:
+                    st.warning(cve_data[0].get("error", "No CVE records found."))
 
 # -----------------------------------------------------------------------------
 # PAGE 2: TARGET SCOPE CONTROL
@@ -206,10 +223,8 @@ elif nav_choice == "Run Assessment":
     if not targets:
         st.warning("No authorized target assets available. Please register a target in Scope Control first.")
     else:
-        # Map label & URL to target objects
         target_options = {f"{t['label']} ({t['target_url']})": t for t in targets}
         
-        # Batch execution configuration controls
         selected_keys = st.multiselect(
             "Select Target Assets for Assessment",
             options=list(target_options.keys()),
@@ -238,7 +253,6 @@ elif nav_choice == "Run Assessment":
                     target = target_options[key]
                     status_text.text(f"Evaluating target [{index + 1}/{len(selected_keys)}]: {target['label']} ({target['target_url']})...")
 
-                    # Scope validation check per target
                     is_valid, msg = validator.validate_target(target["target_url"])
                     if not is_valid:
                         st.error(f"Skipped {target['label']}: Scope Violation - {msg}")
@@ -251,7 +265,6 @@ elif nav_choice == "Run Assessment":
                         })
                         continue
 
-                    # Execute assessment run
                     run_id = db.create_scan_run(target["id"], scan_profile)
                     results = inspector.run_checks(target["id"], target["target_url"])
 
@@ -279,7 +292,6 @@ elif nav_choice == "Run Assessment":
                         "Duplicates": dup_count
                     })
 
-                    # Update progress bar
                     progress_bar.progress((index + 1) / len(selected_keys))
 
                 status_text.empty()
