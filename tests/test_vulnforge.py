@@ -185,7 +185,6 @@ def test_epss_score_retrieval(mock_urlopen):
 @patch("urllib.request.urlopen")
 def test_nvd_cve_search_by_keyword(mock_urlopen):
     """Verify NVD CVE keyword search correctly parses vulnerability records and attaches EPSS scores."""
-    # Mock NVD payload
     mock_nvd_payload = {
         "vulnerabilities": [{
             "cve": {
@@ -203,7 +202,6 @@ def test_nvd_cve_search_by_keyword(mock_urlopen):
         }]
     }
 
-    # Mock EPSS payload
     mock_epss_payload = {
         "data": [{
             "cve": "CVE-2021-23017",
@@ -212,7 +210,6 @@ def test_nvd_cve_search_by_keyword(mock_urlopen):
         }]
     }
 
-    # Context manager setup for sequential urlopen calls
     mock_resp_nvd = MagicMock()
     mock_resp_nvd.status = 200
     mock_resp_nvd.read.return_value = json.dumps(mock_nvd_payload).encode("utf-8")
@@ -235,3 +232,36 @@ def test_nvd_cve_search_by_keyword(mock_urlopen):
     assert cve["severity"] == "CRITICAL"
     assert cve["cvss_score"] == 9.8
     assert cve["epss_probability"] == "85.00%"
+
+def test_cli_headless_scope_violation_exit_code():
+    """Verify CLI scanner exits with status code 2 on scope violation."""
+    from cli import main
+    test_args = ["cli.py", "--target-url", "https://google.com"]
+    with patch("sys.argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+
+def test_cli_headless_successful_execution_and_reports(tmp_path):
+    """Verify CLI scanner completes scan, generates SARIF/JSON outputs, and passes policy gate."""
+    from cli import main
+    
+    sarif_file = str(tmp_path / "cli_test.sarif")
+    json_file = str(tmp_path / "cli_test.json")
+
+    test_args = [
+        "cli.py",
+        "--target-url", "http://localhost:3000",
+        "--fail-on", "Critical",
+        "--sarif-out", sarif_file,
+        "--json-out", json_file
+    ]
+
+    with patch("sys.argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        # Should exit with code 0 (Passed Policy Gate)
+        assert exc_info.value.code == 0
+
+    assert os.path.exists(sarif_file)
+    assert os.path.exists(json_file)
