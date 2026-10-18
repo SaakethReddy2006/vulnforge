@@ -5,6 +5,7 @@ from core.validator import ScopeValidator
 from engine.custom_scanner import SecurityInspector
 from reporting.pdf_generator import PDFReportGenerator
 from core.auth import AuthManager
+from core.recon import ReconEngine
 
 # Page Configuration
 st.set_page_config(page_title="VulnForge Portal", layout="wide", page_icon="🛡️")
@@ -15,6 +16,7 @@ validator = ScopeValidator()
 inspector = SecurityInspector()
 pdf_gen = PDFReportGenerator()
 auth_mgr = AuthManager()
+recon_engine = ReconEngine(validator)
 
 # Initialize Session State
 if "authenticated" not in st.session_state:
@@ -93,10 +95,11 @@ st.sidebar.divider()
 available_pages = ["Overview Dashboard", "Export PDF Reports"]
 
 if current_user["role"] in ["Admin", "Analyst"]:
-    available_pages.insert(1, "Target Scope Control")
-    available_pages.insert(2, "Run Assessment")
-    available_pages.insert(3, "Analyst Triaging")
-    available_pages.insert(4, "Remediation Retest")
+    available_pages.insert(1, "Asset Reconnaissance")
+    available_pages.insert(2, "Target Scope Control")
+    available_pages.insert(3, "Run Assessment")
+    available_pages.insert(4, "Analyst Triaging")
+    available_pages.insert(5, "Remediation Retest")
 
 nav_choice = st.sidebar.radio("Navigation Menu", available_pages)
 
@@ -121,6 +124,49 @@ if nav_choice == "Overview Dashboard":
         st.dataframe(findings, use_container_width=True)
     else:
         st.info("No security observations recorded in database yet.")
+
+# -----------------------------------------------------------------------------
+# PAGE: ASSET RECONNAISSANCE (TRACK 1)
+# -----------------------------------------------------------------------------
+elif nav_choice == "Asset Reconnaissance":
+    st.title("🔎 Automated Asset Discovery & Reconnaissance")
+    st.caption("Passive CT log subdomain discovery, async port scanning, and tech stack fingerprinting.")
+
+    targets = db.fetch_all_targets()
+    if not targets:
+        st.warning("No targets authorized. Please register a target in Target Scope Control first.")
+    else:
+        target_map = {f"{t['label']} ({t['target_url']})": t for t in targets}
+        selected_key = st.selectbox("Select Target Asset for Reconnaissance", list(target_map.keys()))
+        target = target_map[selected_key]
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("🌐 Passive Subdomain Discovery")
+            if st.button("Run crt.sh Discovery"):
+                with st.spinner("Querying CT logs & verifying scope..."):
+                    subs = recon_engine.discover_subdomains(target["target_url"])
+                    st.success(f"Discovered {len(subs)} authorized asset(s).")
+                    st.write(subs)
+
+        with col2:
+            st.subheader("🔌 Async Port Scanner")
+            if st.button("Scan Common TCP Ports"):
+                with st.spinner("Executing async TCP probe..."):
+                    open_ports = recon_engine.run_port_scan(target["target_url"])
+                    if open_ports:
+                        st.success(f"Found {len(open_ports)} open port(s).")
+                        st.table(open_ports)
+                    else:
+                        st.info("No common open ports detected.")
+
+        st.divider()
+        st.subheader("🧩 Technology Stack Fingerprinting")
+        if st.button("Fingerprint Web Tech Stack"):
+            with st.spinner("Analyzing HTTP headers & meta banners..."):
+                tech_data = recon_engine.fingerprint_tech_stack(target["target_url"])
+                st.json(tech_data)
 
 # -----------------------------------------------------------------------------
 # PAGE 2: TARGET SCOPE CONTROL
@@ -150,44 +196,98 @@ elif nav_choice == "Target Scope Control":
     st.table(db.fetch_all_targets())
 
 # -----------------------------------------------------------------------------
-# PAGE 3: RUN ASSESSMENT
+# PAGE 3: RUN ASSESSMENT (MULTI-TARGET BATCH SCANNING)
 # -----------------------------------------------------------------------------
 elif nav_choice == "Run Assessment":
     st.title("🚀 Execute Assessment Run")
+    st.caption("Launch security inspection runs across single or multiple authorized target assets.")
     
     targets = db.fetch_all_targets()
     if not targets:
-        st.warning("No authorized target assets available. Please register a target first.")
+        st.warning("No authorized target assets available. Please register a target in Scope Control first.")
     else:
+        # Map label & URL to target objects
         target_options = {f"{t['label']} ({t['target_url']})": t for t in targets}
-        selected_key = st.selectbox("Select Target Asset", list(target_options.keys()))
-        selected_target = target_options[selected_key]
+        
+        # Batch execution configuration controls
+        selected_keys = st.multiselect(
+            "Select Target Assets for Assessment",
+            options=list(target_options.keys()),
+            default=[list(target_options.keys())[0]] if target_options else []
+        )
 
-        if st.button("Launch Security Inspection"):
-            is_valid, msg = validator.validate_target(selected_target["target_url"])
-            if not is_valid:
-                st.error(f"Scan Execution Aborted: {msg}")
+        scan_profile = st.selectbox(
+            "Select Inspection Profile",
+            ["Custom HTTP Inspector", "Comprehensive Baseline Scan"]
+        )
+
+        if st.button("Launch Security Inspection Batch", type="primary"):
+            if not selected_keys:
+                st.warning("Please select at least one target asset to inspect.")
             else:
-                st.info(f"Executing checks against {selected_target['target_url']}...")
+                st.info(f"Initiating batch assessment across {len(selected_keys)} target(s)...")
                 
-                run_id = db.create_scan_run(selected_target["id"], "Custom HTTP Inspector")
-                results = inspector.run_checks(selected_target["id"], selected_target["target_url"])
+                total_new = 0
+                total_dup = 0
+                batch_summary = []
 
-                new_count = 0
-                dup_count = 0
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-                for item in results:
-                    _, is_new = db.save_vulnerability(run_id, selected_target["id"], item)
-                    if is_new:
-                        new_count += 1
-                    else:
-                        dup_count += 1
+                for index, key in enumerate(selected_keys):
+                    target = target_options[key]
+                    status_text.text(f"Evaluating target [{index + 1}/{len(selected_keys)}]: {target['label']} ({target['target_url']})...")
 
-                db.finalize_scan_run(run_id, "Completed")
-                st.success(f"Scan Run #{run_id} complete! Added {new_count} new observation(s). ({dup_count} duplicate(s) filtered)")
-                
-                if results:
-                    st.dataframe(results, use_container_width=True)
+                    # Scope validation check per target
+                    is_valid, msg = validator.validate_target(target["target_url"])
+                    if not is_valid:
+                        st.error(f"Skipped {target['label']}: Scope Violation - {msg}")
+                        batch_summary.append({
+                            "Target": target["label"],
+                            "URL": target["target_url"],
+                            "Status": "Aborted (Scope Violation)",
+                            "New Findings": 0,
+                            "Duplicates": 0
+                        })
+                        continue
+
+                    # Execute assessment run
+                    run_id = db.create_scan_run(target["id"], scan_profile)
+                    results = inspector.run_checks(target["id"], target["target_url"])
+
+                    new_count = 0
+                    dup_count = 0
+
+                    for item in results:
+                        _, is_new = db.save_vulnerability(run_id, target["id"], item)
+                        if is_new:
+                            new_count += 1
+                        else:
+                            dup_count += 1
+
+                    db.finalize_scan_run(run_id, "Completed")
+                    
+                    total_new += new_count
+                    total_dup += dup_count
+
+                    batch_summary.append({
+                        "Target": target["label"],
+                        "URL": target["target_url"],
+                        "Run ID": f"#{run_id}",
+                        "Status": "Completed",
+                        "New Findings": new_count,
+                        "Duplicates": dup_count
+                    })
+
+                    # Update progress bar
+                    progress_bar.progress((index + 1) / len(selected_keys))
+
+                status_text.empty()
+                progress_bar.empty()
+
+                st.success(f"Batch Execution Finished! Processed {len(selected_keys)} target(s) — Total New Findings: {total_new} | Total Duplicates Filtered: {total_dup}")
+                st.subheader("Batch Execution Summary")
+                st.dataframe(batch_summary, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # PAGE 4: ANALYST TRIAGING
