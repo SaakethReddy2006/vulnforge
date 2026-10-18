@@ -1,5 +1,6 @@
 import os
 import streamlit as st
+import pandas as pd
 from db import DatabaseManager
 from core.validator import ScopeValidator
 from engine.custom_scanner import SecurityInspector
@@ -106,10 +107,10 @@ if current_user["role"] in ["Admin", "Analyst"]:
 nav_choice = st.sidebar.radio("Navigation Menu", available_pages)
 
 # -----------------------------------------------------------------------------
-# PAGE 1: OVERVIEW DASHBOARD
+# PAGE 1: OVERVIEW DASHBOARD & ANALYTICS
 # -----------------------------------------------------------------------------
 if nav_choice == "Overview Dashboard":
-    st.title("📊 Security Operations Overview")
+    st.title("📊 Security Operations Overview & Analytics")
     
     targets = db.fetch_all_targets()
     findings = db.fetch_vulnerabilities_overview()
@@ -121,8 +122,26 @@ if nav_choice == "Overview Dashboard":
     col4.metric("Confirmed Issues", sum(1 for f in findings if f["review_state"] == "Confirmed Vulnerability"))
 
     st.divider()
-    st.subheader("Discovered Vulnerability Findings")
+
     if findings:
+        df_findings = pd.DataFrame(findings)
+
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.subheader("⚠️ Severity Distribution Breakdown")
+            severity_counts = df_findings["risk_level"].value_counts().reset_index()
+            severity_counts.columns = ["Risk Level", "Count"]
+            st.bar_chart(severity_counts, x="Risk Level", y="Count")
+
+        with col_right:
+            st.subheader("📋 Triaging State Breakdown")
+            triage_counts = df_findings["review_state"].value_counts().reset_index()
+            triage_counts.columns = ["Review State", "Count"]
+            st.bar_chart(triage_counts, x="Review State", y="Count")
+
+        st.divider()
+        st.subheader("Discovered Vulnerability Findings")
         st.dataframe(findings, use_container_width=True)
     else:
         st.info("No security observations recorded in database yet.")
@@ -213,11 +232,11 @@ elif nav_choice == "Target Scope Control":
     st.table(db.fetch_all_targets())
 
 # -----------------------------------------------------------------------------
-# PAGE 3: RUN ASSESSMENT (MULTI-TARGET BATCH SCANNING)
+# PAGE 3: RUN ASSESSMENT (REAL-TIME SCAN LOGGING & BATCH EXECUTION)
 # -----------------------------------------------------------------------------
 elif nav_choice == "Run Assessment":
     st.title("🚀 Execute Assessment Run")
-    st.caption("Launch security inspection runs across single or multiple authorized target assets.")
+    st.caption("Launch security inspection runs across single or multiple authorized target assets with live progress logging.")
     
     targets = db.fetch_all_targets()
     if not targets:
@@ -247,55 +266,61 @@ elif nav_choice == "Run Assessment":
                 batch_summary = []
 
                 progress_bar = st.progress(0)
-                status_text = st.empty()
 
-                for index, key in enumerate(selected_keys):
-                    target = target_options[key]
-                    status_text.text(f"Evaluating target [{index + 1}/{len(selected_keys)}]: {target['label']} ({target['target_url']})...")
+                # Streamlit expandable live status container
+                with st.status("Executing Assessment Run...", expanded=True) as status_container:
+                    for index, key in enumerate(selected_keys):
+                        target = target_options[key]
+                        st.write(f"🔍 **Evaluating target [{index + 1}/{len(selected_keys)}]:** `{target['label']}` ({target['target_url']})...")
 
-                    is_valid, msg = validator.validate_target(target["target_url"])
-                    if not is_valid:
-                        st.error(f"Skipped {target['label']}: Scope Violation - {msg}")
+                        # Scope validation check
+                        is_valid, msg = validator.validate_target(target["target_url"])
+                        if not is_valid:
+                            st.write(f"❌ **Scope Violation:** Skipped `{target['label']}` — {msg}")
+                            batch_summary.append({
+                                "Target": target["label"],
+                                "URL": target["target_url"],
+                                "Status": "Aborted (Scope Violation)",
+                                "New Findings": 0,
+                                "Duplicates": 0
+                            })
+                            continue
+
+                        # Execute inspection
+                        run_id = db.create_scan_run(target["id"], scan_profile)
+                        st.write(f"⚙️ Launched Scan Run ID `#{run_id}`. Executing security checks...")
+                        results = inspector.run_checks(target["id"], target["target_url"])
+
+                        new_count = 0
+                        dup_count = 0
+
+                        for item in results:
+                            _, is_new = db.save_vulnerability(run_id, target["id"], item)
+                            if is_new:
+                                new_count += 1
+                                st.write(f"  └ ⚠️ Discovered New Finding: `{item['name']}` [{item['risk_level']}]")
+                            else:
+                                dup_count += 1
+                                st.write(f"  └ ℹ️ Filtered Duplicate Finding: `{item['name']}`")
+
+                        db.finalize_scan_run(run_id, "Completed")
+                        st.write(f"✅ Completed target `{target['label']}` — Saved {new_count} new issue(s).")
+                        
+                        total_new += new_count
+                        total_dup += dup_count
+
                         batch_summary.append({
                             "Target": target["label"],
                             "URL": target["target_url"],
-                            "Status": "Aborted (Scope Violation)",
-                            "New Findings": 0,
-                            "Duplicates": 0
+                            "Run ID": f"#{run_id}",
+                            "Status": "Completed",
+                            "New Findings": new_count,
+                            "Duplicates": dup_count
                         })
-                        continue
 
-                    run_id = db.create_scan_run(target["id"], scan_profile)
-                    results = inspector.run_checks(target["id"], target["target_url"])
+                        progress_bar.progress((index + 1) / len(selected_keys))
 
-                    new_count = 0
-                    dup_count = 0
-
-                    for item in results:
-                        _, is_new = db.save_vulnerability(run_id, target["id"], item)
-                        if is_new:
-                            new_count += 1
-                        else:
-                            dup_count += 1
-
-                    db.finalize_scan_run(run_id, "Completed")
-                    
-                    total_new += new_count
-                    total_dup += dup_count
-
-                    batch_summary.append({
-                        "Target": target["label"],
-                        "URL": target["target_url"],
-                        "Run ID": f"#{run_id}",
-                        "Status": "Completed",
-                        "New Findings": new_count,
-                        "Duplicates": dup_count
-                    })
-
-                    progress_bar.progress((index + 1) / len(selected_keys))
-
-                status_text.empty()
-                progress_bar.empty()
+                    status_container.update(label="Batch Assessment Complete!", state="complete", expanded=False)
 
                 st.success(f"Batch Execution Finished! Processed {len(selected_keys)} target(s) — Total New Findings: {total_new} | Total Duplicates Filtered: {total_dup}")
                 st.subheader("Batch Execution Summary")
