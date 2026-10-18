@@ -1,0 +1,39 @@
+name: VulnForge CI/CD Security Gate
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  security-gate-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Pytest Test Suite
+      run: |
+        python -m pytest tests/test_vulnforge.py -v
+
+    - name: Execute Headless VulnForge Security Gate Scan
+      run: |
+        python cli.py --target-url "http://localhost:3000" --fail-on "High" --sarif-out "vulnforge.sarif"
+
+    - name: Upload SARIF Artifact to GitHub Code Scanning
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: vulnforge.sarif
