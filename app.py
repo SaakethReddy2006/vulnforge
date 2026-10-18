@@ -4,27 +4,101 @@ from db import DatabaseManager
 from core.validator import ScopeValidator
 from engine.custom_scanner import SecurityInspector
 from reporting.pdf_generator import PDFReportGenerator
+from core.auth import AuthManager
 
-# Initialize Core Services
+# Page Configuration
+st.set_page_config(page_title="VulnForge Portal", layout="wide", page_icon="🛡️")
+
+# Initialize Core Services & Authentication Manager
 db = DatabaseManager()
 validator = ScopeValidator()
 inspector = SecurityInspector()
 pdf_gen = PDFReportGenerator()
+auth_mgr = AuthManager()
 
-st.set_page_config(page_title="VulnForge Portal", layout="wide", page_icon="🛡️")
+# Initialize Session State
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+if "user_info" not in st.session_state:
+    st.session_state["user_info"] = None
 
-# Navigation Sidebar
+# -----------------------------------------------------------------------------
+# LOGIN & USER REGISTRATION GATEWAY
+# -----------------------------------------------------------------------------
+def render_login_screen():
+    st.title("🛡️ VulnForge VAPT Platform")
+    st.caption("SecOps Vulnerability Assessment & Evidence Management System")
+    st.divider()
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        tab_login, tab_register = st.tabs(["🔐 Sign In", "👤 Create User Account"])
+
+        with tab_login:
+            st.subheader("Account Login")
+            login_username = st.text_input("Username", key="login_user")
+            login_password = st.text_input("Password", type="password", key="login_pass")
+
+            if st.button("Log In", use_container_width=True, type="primary"):
+                if login_username and login_password:
+                    user = auth_mgr.authenticate_user(login_username, login_password)
+                    if user:
+                        st.session_state["authenticated"] = True
+                        st.session_state["user_info"] = user
+                        st.success(f"Authenticated as {user['username']} ({user['role']})")
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
+                else:
+                    st.warning("Please enter both username and password.")
+
+        with tab_register:
+            st.subheader("Register User")
+            reg_username = st.text_input("New Username", key="reg_user")
+            reg_password = st.text_input("New Password", type="password", key="reg_pass")
+            reg_role = st.selectbox("Role Assignment", ["Admin", "Analyst", "Viewer"], key="reg_role")
+
+            if st.button("Register Account", use_container_width=True):
+                if reg_username and reg_password:
+                    success = auth_mgr.register_user(reg_username, reg_password, reg_role)
+                    if success:
+                        st.success(f"Account '{reg_username}' registered! You can now log in.")
+                    else:
+                        st.error("Registration failed. Username may already exist.")
+                else:
+                    st.warning("All fields are required.")
+
+# Direct unauthenticated users to the login gateway
+if not st.session_state["authenticated"]:
+    render_login_screen()
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# AUTHENTICATED USER SESSION & SIDEBAR NAVIGATION
+# -----------------------------------------------------------------------------
+current_user = st.session_state["user_info"]
+
 st.sidebar.title("🛡️ VulnForge Platform")
-st.sidebar.caption("SecOps VAPT & Evidence Platform")
+st.sidebar.markdown(f"**User:** `{current_user['username']}`")
+st.sidebar.markdown(f"**Role:** `{current_user['role']}`")
 
-nav_choice = st.sidebar.radio("Navigation Menu", [
-    "Overview Dashboard",
-    "Target Scope Control",
-    "Run Assessment",
-    "Analyst Triaging",
-    "Remediation Retest",
-    "Export PDF Reports"
-])
+if st.sidebar.button("Log Out", type="secondary"):
+    st.session_state["authenticated"] = False
+    st.session_state["user_info"] = None
+    st.rerun()
+
+st.sidebar.divider()
+
+# Role-Based Navigation Access Control
+available_pages = ["Overview Dashboard", "Export PDF Reports"]
+
+if current_user["role"] in ["Admin", "Analyst"]:
+    available_pages.insert(1, "Target Scope Control")
+    available_pages.insert(2, "Run Assessment")
+    available_pages.insert(3, "Analyst Triaging")
+    available_pages.insert(4, "Remediation Retest")
+
+nav_choice = st.sidebar.radio("Navigation Menu", available_pages)
 
 # -----------------------------------------------------------------------------
 # PAGE 1: OVERVIEW DASHBOARD
@@ -90,7 +164,6 @@ elif nav_choice == "Run Assessment":
         selected_target = target_options[selected_key]
 
         if st.button("Launch Security Inspection"):
-            # Enforce Scope again prior to scanning
             is_valid, msg = validator.validate_target(selected_target["target_url"])
             if not is_valid:
                 st.error(f"Scan Execution Aborted: {msg}")
@@ -193,11 +266,14 @@ elif nav_choice == "Remediation Retest":
         st.dataframe(db.fetch_retest_history(), use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# PAGE 6: EXPORT PDF REPORTS
+# PAGE 6: EXPORT REPORTS
 # -----------------------------------------------------------------------------
 elif nav_choice == "Export PDF Reports":
-    st.header("📄 Export PDF Security Reports")
-    st.caption("Compile assessment results, evidence snippets, and triaging rationale into publication-ready PDF reports.")
+    st.header("📄 Export Security Assessment Reports")
+    st.caption("Compile assessment results into PDF, SARIF v2.1.0, or JSON formats.")
+
+    from reporting.sarif_exporter import SARIFExporter
+    sarif_exp = SARIFExporter(db)
 
     targets = db.fetch_all_targets()
     if not targets:
@@ -215,25 +291,31 @@ elif nav_choice == "Export PDF Reports":
         conn.close()
 
         if not runs:
-            st.info("No scan runs recorded yet. Execute an assessment run first.")
+            st.info("No scan runs recorded yet.")
         else:
-            run_dict = {f"Run #{r['id']} - {r['label']} ({r['profile_name']}) [{r['execution_status']}] - {r['launched_at']}": r['id'] for r in runs}
+            run_dict = {f"Run #{r['id']} - {r['label']} ({r['profile_name']}) [{r['execution_status']}]": r['id'] for r in runs}
             selected_run_key = st.selectbox("Select Scan Run", list(run_dict.keys()))
             selected_run_id = run_dict[selected_run_key]
 
-            if st.button("Compile Executive PDF Report"):
-                try:
-                    pdf_filename = f"VulnForge_Executive_Report_Run_{selected_run_id}.pdf"
-                    generated_path = pdf_gen.generate_report(selected_run_id, pdf_filename)
+            col1, col2, col3 = st.columns(3)
 
-                    st.success(f"Report compiled successfully: `{generated_path}`")
+            with col1:
+                if st.button("Compile PDF Report", use_container_width=True):
+                    pdf_filename = f"VulnForge_Report_Run_{selected_run_id}.pdf"
+                    path = pdf_gen.generate_report(selected_run_id, pdf_filename)
+                    with open(path, "rb") as f:
+                        st.download_button("Download PDF", f.read(), file_name=pdf_filename, mime="application/pdf")
 
-                    with open(generated_path, "rb") as file_bytes:
-                        st.download_button(
-                            label="Download PDF Report",
-                            data=file_bytes.read(),
-                            file_name=pdf_filename,
-                            mime="application/pdf"
-                        )
-                except Exception as e:
-                    st.error(f"Report Generation Failed: {str(e)}")
+            with col2:
+                if st.button("Export SARIF (GitHub/SIEM)", use_container_width=True):
+                    sarif_filename = f"VulnForge_Run_{selected_run_id}.sarif"
+                    path = sarif_exp.export_run_to_sarif(selected_run_id, sarif_filename)
+                    with open(path, "rb") as f:
+                        st.download_button("Download SARIF", f.read(), file_name=sarif_filename, mime="application/json")
+
+            with col3:
+                if st.button("Export Structured JSON", use_container_width=True):
+                    json_filename = f"VulnForge_Run_{selected_run_id}.json"
+                    path = sarif_exp.export_run_to_json(selected_run_id, json_filename)
+                    with open(path, "rb") as f:
+                        st.download_button("Download JSON", f.read(), file_name=json_filename, mime="application/json")
