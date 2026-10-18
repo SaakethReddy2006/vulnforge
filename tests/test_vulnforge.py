@@ -5,6 +5,7 @@ from db import DatabaseManager
 from core.validator import ScopeValidator
 from engine.custom_scanner import SecurityInspector
 from reporting.sarif_exporter import SARIFExporter
+from core.recon import ReconEngine
 
 @pytest.fixture
 def test_db(tmp_path):
@@ -13,16 +14,20 @@ def test_db(tmp_path):
     return DatabaseManager(db_file=str(db_file))
 
 def test_scope_validator_authorization():
+    """Verify scope validator correctly approves local targets and rejects unauthorized egress URLs."""
     validator = ScopeValidator()
     
+    # Authorized local lab target
     is_valid, _ = validator.validate_target("http://localhost:3000")
     assert is_valid is True
 
+    # Unauthorized external egress target
     is_valid_ext, msg = validator.validate_target("https://google.com")
     assert is_valid_ext is False
     assert "Scope Violation" in msg or "Unauthorized" in msg
 
 def test_target_registration_and_scan_run(test_db):
+    """Verify target asset creation and scan run lifecycle in database DAO."""
     success = test_db.add_target("Test Local Target", "http://localhost:8000", "Local Isolated Lab")
     assert success is True
 
@@ -44,6 +49,7 @@ def test_target_registration_and_scan_run(test_db):
     assert status == "Completed"
 
 def test_vulnerability_fingerprint_deduplication(test_db):
+    """Verify SHA-256 fingerprint deduplication prevents duplicate vulnerability entries."""
     test_db.add_target("Deduplication Target", "http://localhost:8080", "Local Isolated Lab")
     targets = test_db.fetch_all_targets()
     target_id = targets[0]["id"]
@@ -71,6 +77,7 @@ def test_vulnerability_fingerprint_deduplication(test_db):
     assert is_new_2 is False
 
 def test_sarif_and_json_exporter_integration(test_db, tmp_path):
+    """Verify SARIF v2.1.0 and JSON export generation and structure."""
     test_db.add_target("SARIF Test Lab", "http://localhost:8000", "Local Isolated Lab")
     targets = test_db.fetch_all_targets()
     target_id = targets[0]["id"]
@@ -118,3 +125,24 @@ def test_sarif_and_json_exporter_integration(test_db, tmp_path):
     assert json_data["platform"] == "VulnForge"
     assert json_data["findings_count"] == 1
     assert json_data["findings"][0]["vuln_name"] == "Missing Security Header: Content-Security-Policy"
+
+def test_recon_engine_subdomain_discovery_scope_filter():
+    """Verify ReconEngine returns only authorized target domain/subdomains based on ScopeValidator."""
+    validator = ScopeValidator()
+    recon = ReconEngine(validator=validator)
+
+    # Authorized local domain
+    subdomains = recon.discover_subdomains("localhost")
+    assert isinstance(subdomains, list)
+    assert "localhost" in subdomains
+
+    # External unauthorized domain should return empty list due to zero-trust scope filter
+    ext_subdomains = recon.discover_subdomains("example.com")
+    assert ext_subdomains == []
+
+def test_recon_engine_async_port_scan():
+    """Verify async TCP port scanning returns structured list of port states."""
+    validator = ScopeValidator()
+    recon = ReconEngine(validator=validator)
+
+    # Probe port 8
